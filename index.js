@@ -1,10 +1,13 @@
 // @ts-check
 (function () {
     const MODULE_NAME = 'st_devtools';
+    const MAX_STRINGIFY_LEN = 1000;  // truncate fat objects
+    const MAX_VISIBLE_DOM = 150;     // cap DOM nodes in the log list
+    const FLUSH_INTERVAL = 300;      // ms between DOM flushes
 
     const DEFAULT_SETTINGS = Object.freeze({
         enabled: true,
-        max_entries: 500,
+        max_entries: 200,
         capture_log: true,
         capture_warn: true,
         capture_error: true,
@@ -14,22 +17,24 @@
         word_wrap: true,
     });
 
-    /** @type {Array<{id: number, level: string, time: string, args: string}>} */
+    /** @type {Array<{level: string, time: string, args: string}>} */
     let logBuffer = [];
-    let idCounter = 0;
     let activeFilter = 'all';
     let searchQuery = '';
     let consoleVisible = false;
 
-    // --- Performance: batch DOM updates ---
-    /** @type {Array<{id: number, level: string, time: string, args: string}>} */
+    // Performance state
+    /** @type {Array<{level: string, time: string, args: string}>} */
     let pendingEntries = [];
-    let flushScheduled = false;
+    let flushTimer = 0;
     let errCount = 0;
     let warnCount = 0;
 
-    // Original console references — saved ONCE
-    const _originals = {
+    /** @type {ReturnType<typeof getSettings>|null} */
+    let _cachedSettings = null;
+
+    // Original console — saved ONCE
+    const _orig = {
         log: console.log.bind(console),
         warn: console.warn.bind(console),
         error: console.error.bind(console),
@@ -37,176 +42,216 @@
         debug: console.debug.bind(console),
     };
 
+    // =========================================================================
+    //  SETTINGS (cached)
+    // =========================================================================
     function getSettings() {
+        if (_cachedSettings) return _cachedSettings;
         const ctx = SillyTavern.getContext();
         if (!ctx.extensionSettings) ctx.extensionSettings = {};
         if (!ctx.extensionSettings[MODULE_NAME]) {
             ctx.extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
         }
-        return ctx.extensionSettings[MODULE_NAME];
+        _cachedSettings = ctx.extensionSettings[MODULE_NAME];
+        return _cachedSettings;
     }
 
     function saveSettings() {
         SillyTavern.getContext().saveSettingsDebounced();
     }
 
+    // =========================================================================
+    //  FAST HELPERS (no DOM, no allocations)
+    // =========================================================================
+    const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+    const _escapeRe = /[&<>"]/g;
+
+    function escapeHtml(s) {
+        return s.replace(_escapeRe, ch => _escapeMap[ch]);
+    }
+
     function timestamp() {
         const d = new Date();
-        const hh = String(d.getHours()).padStart(2, '0');
-        const mm = String(d.getMinutes()).padStart(2, '0');
-        const ss = String(d.getSeconds()).padStart(2, '0');
-        const ms = String(d.getMilliseconds()).padStart(3, '0');
-        return `${hh}:${mm}:${ss}.${ms}`;
+        return (
+            String(d.getHours()).padStart(2, '0') + ':' +
+            String(d.getMinutes()).padStart(2, '0') + ':' +
+            String(d.getSeconds()).padStart(2, '0') + '.' +
+            String(d.getMilliseconds()).padStart(3, '0')
+        );
     }
 
     function stringify(val) {
         if (val === undefined) return 'undefined';
         if (val === null) return 'null';
-        if (val instanceof Error) return `${val.name}: ${val.message}\n${val.stack || ''}`;
+        if (typeof val === 'string') return val;
+        if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+        if (val instanceof Error) {
+            const s = val.stack || `${val.name}: ${val.message}`;
+            return s.length > MAX_STRINGIFY_LEN ? s.slice(0, MAX_STRINGIFY_LEN) + '…' : s;
+        }
         if (typeof val === 'object') {
-            try { return JSON.stringify(val, null, 2); }
-            catch { return String(val); }
+            try {
+                const s = JSON.stringify(val);
+                return s.length > MAX_STRINGIFY_LEN ? s.slice(0, MAX_STRINGIFY_LEN) + '…' : s;
+            } catch { return String(val); }
         }
         return String(val);
     }
 
-    function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.appendChild(document.createTextNode(str));
-        return div.innerHTML;
+    function argsToString(args) {
+        let out = '';
+        for (let i = 0; i < args.length; i++) {
+            if (i > 0) out += ' ';
+            out += stringify(args[i]);
+        }
+        return out;
     }
 
     // =========================================================================
-    //  INTERCEPT
+    //  INTERCEPT CORE
     // =========================================================================
     function pushEntry(level, args) {
-        const settings = getSettings();
-        const entry = {
-            id: ++idCounter,
-            level,
-            time: timestamp(),
-            args: Array.from(args).map(stringify).join(' '),
-        };
+        const s = getSettings();
+        const entry = { level, time: timestamp(), args: argsToString(args) };
 
         logBuffer.push(entry);
         if (level === 'error') errCount++;
         if (level === 'warn') warnCount++;
 
-        // Trim oldest
-        while (logBuffer.length > settings.max_entries) {
-            const removed = logBuffer.shift();
-            if (removed.level === 'error') errCount--;
-            if (removed.level === 'warn') warnCount--;
+        // Trim — pop from front
+        const max = s.max_entries;
+        while (logBuffer.length > max) {
+            const r = logBuffer.shift();
+            if (r.level === 'error') errCount--;
+            if (r.level === 'warn') warnCount--;
         }
 
-        // Queue for batch DOM update instead of immediate append
         if (consoleVisible) {
             pendingEntries.push(entry);
-            scheduleFlush();
+            if (!flushTimer) {
+                flushTimer = setTimeout(flushPending, FLUSH_INTERVAL);
+            }
         }
-    }
-
-    function scheduleFlush() {
-        if (flushScheduled) return;
-        flushScheduled = true;
-        requestAnimationFrame(flushPending);
     }
 
     function flushPending() {
-        flushScheduled = false;
-        const $list = $('#dt-log-list');
-        if (!$list.length || pendingEntries.length === 0) {
+        flushTimer = 0;
+        const el = document.getElementById('dt-log-list');
+        if (!el || pendingEntries.length === 0) {
             pendingEntries = [];
             return;
         }
 
-        // Build all HTML at once, append once
-        const htmlParts = [];
-        for (const entry of pendingEntries) {
-            if (activeFilter !== 'all' && entry.level !== activeFilter) continue;
-            if (searchQuery && !entry.args.toLowerCase().includes(searchQuery)) continue;
-            htmlParts.push(buildEntryHtml(entry));
+        const s = getSettings();
+        let html = '';
+        for (let i = 0; i < pendingEntries.length; i++) {
+            const e = pendingEntries[i];
+            if (activeFilter !== 'all' && e.level !== activeFilter) continue;
+            if (searchQuery && e.args.toLowerCase().indexOf(searchQuery) === -1) continue;
+            html += entryHtml(e, s);
         }
         pendingEntries = [];
 
-        if (htmlParts.length > 0) {
-            $list.append(htmlParts.join(''));
-            $list[0].scrollTop = $list[0].scrollHeight;
+        if (html) {
+            el.insertAdjacentHTML('beforeend', html);
+
+            // Cap visible DOM nodes — remove from top
+            while (el.childElementCount > MAX_VISIBLE_DOM) {
+                el.removeChild(el.firstElementChild);
+            }
+
+            el.scrollTop = el.scrollHeight;
         }
 
         updateCounters();
     }
 
+    // =========================================================================
+    //  HOOKS
+    // =========================================================================
     function installHooks() {
-        const settings = getSettings();
-        const wrap = (level, original) => {
-            return function (...args) {
-                original(...args);
-                if (settings[`capture_${level}`]) pushEntry(level, args);
-            };
+        const s = getSettings();
+        if (!s.enabled) return;
+
+        const wrap = (level, orig) => function () {
+            orig.apply(console, arguments);
+            if (s['capture_' + level]) pushEntry(level, arguments);
         };
-        if (settings.enabled) {
-            console.log   = wrap('log',   _originals.log);
-            console.warn  = wrap('warn',  _originals.warn);
-            console.error = wrap('error', _originals.error);
-            console.info  = wrap('info',  _originals.info);
-            console.debug = wrap('debug', _originals.debug);
-        }
+
+        console.log   = wrap('log',   _orig.log);
+        console.warn  = wrap('warn',  _orig.warn);
+        console.error = wrap('error', _orig.error);
+        console.info  = wrap('info',  _orig.info);
+        console.debug = wrap('debug', _orig.debug);
     }
 
     function uninstallHooks() {
-        console.log   = _originals.log;
-        console.warn  = _originals.warn;
-        console.error = _originals.error;
-        console.info  = _originals.info;
-        console.debug = _originals.debug;
+        console.log   = _orig.log;
+        console.warn  = _orig.warn;
+        console.error = _orig.error;
+        console.info  = _orig.info;
+        console.debug = _orig.debug;
     }
 
     function installGlobalCatchers() {
-        window.addEventListener('error', (ev) => {
+        window.addEventListener('error', function (ev) {
             const msg = ev.message || 'Unknown error';
-            const src = ev.filename ? `\n    at ${ev.filename}:${ev.lineno}:${ev.colno}` : '';
-            pushEntry('error', [`[Uncaught] ${msg}${src}`]);
+            const src = ev.filename ? '\n    at ' + ev.filename + ':' + ev.lineno + ':' + ev.colno : '';
+            pushEntry('error', ['[Uncaught] ' + msg + src]);
         });
-        window.addEventListener('unhandledrejection', (ev) => {
-            const reason = ev.reason instanceof Error
-                ? `${ev.reason.message}\n${ev.reason.stack || ''}`
-                : stringify(ev.reason);
-            pushEntry('error', [`[Unhandled Promise] ${reason}`]);
+        window.addEventListener('unhandledrejection', function (ev) {
+            const r = ev.reason;
+            const msg = r instanceof Error ? (r.stack || r.message) : stringify(r);
+            pushEntry('error', ['[Unhandled Promise] ' + msg]);
         });
     }
 
     // =========================================================================
-    //  DOM
+    //  DOM — minimal, fast
     // =========================================================================
-    function buildEntryHtml(entry) {
-        const settings = getSettings();
-        const timeStr = settings.show_timestamps
-            ? `<span class="dt-time">${entry.time}</span> `
-            : '';
-        const levelTag = `<span class="dt-badge dt-badge-${entry.level}">${entry.level.toUpperCase()}</span> `;
-        return `<div class="dt-entry dt-entry-${entry.level}" data-id="${entry.id}">${timeStr}${levelTag}<span class="dt-msg">${escapeHtml(entry.args)}</span></div>`;
+    function entryHtml(e, s) {
+        const t = s.show_timestamps ? '<span class="dt-time">' + e.time + '</span> ' : '';
+        return '<div class="dt-entry dt-entry-' + e.level + '">' +
+            t +
+            '<span class="dt-badge dt-badge-' + e.level + '">' + e.level.toUpperCase() + '</span> ' +
+            '<span class="dt-msg">' + escapeHtml(e.args) + '</span>' +
+            '</div>';
     }
 
     function renderAllEntries() {
-        const $list = $('#dt-log-list');
-        if (!$list.length) return;
-        const filtered = logBuffer.filter(e => {
-            if (activeFilter !== 'all' && e.level !== activeFilter) return false;
-            if (searchQuery && !e.args.toLowerCase().includes(searchQuery)) return false;
-            return true;
-        });
-        $list.html(filtered.map(buildEntryHtml).join(''));
-        $list[0].scrollTop = $list[0].scrollHeight;
+        const el = document.getElementById('dt-log-list');
+        if (!el) return;
+
+        const s = getSettings();
+        let filtered = logBuffer;
+
+        if (activeFilter !== 'all' || searchQuery) {
+            filtered = [];
+            for (let i = 0; i < logBuffer.length; i++) {
+                const e = logBuffer[i];
+                if (activeFilter !== 'all' && e.level !== activeFilter) continue;
+                if (searchQuery && e.args.toLowerCase().indexOf(searchQuery) === -1) continue;
+                filtered.push(e);
+            }
+        }
+
+        // Only render last MAX_VISIBLE_DOM entries
+        const start = Math.max(0, filtered.length - MAX_VISIBLE_DOM);
+        let html = '';
+        for (let i = start; i < filtered.length; i++) {
+            html += entryHtml(filtered[i], s);
+        }
+        el.innerHTML = html;
+        el.scrollTop = el.scrollHeight;
     }
 
     function updateCounters() {
-        const $c = $('#dt-counter');
-        if (!$c.length) return;
-        let txt = `${logBuffer.length}`;
-        if (errCount) txt += ` · <span style="color:#ff6b6b">${errCount} err</span>`;
-        if (warnCount) txt += ` · <span style="color:#ffa726">${warnCount} warn</span>`;
-        $c.html(txt);
+        const el = document.getElementById('dt-counter');
+        if (!el) return;
+        let t = String(logBuffer.length);
+        if (errCount) t += ' · <span style="color:#ff6b6b">' + errCount + ' err</span>';
+        if (warnCount) t += ' · <span style="color:#ffa726">' + warnCount + ' warn</span>';
+        el.innerHTML = t;
     }
 
     // =========================================================================
@@ -215,40 +260,47 @@
     function clearLogs() {
         logBuffer = [];
         pendingEntries = [];
-        idCounter = 0;
         errCount = 0;
         warnCount = 0;
-        $('#dt-log-list').empty();
+        const el = document.getElementById('dt-log-list');
+        if (el) el.innerHTML = '';
         updateCounters();
     }
 
     function exportLogs() {
-        const text = logBuffer.map(e => `[${e.time}] [${e.level.toUpperCase()}] ${e.args}`).join('\n');
+        let text = '';
+        for (let i = 0; i < logBuffer.length; i++) {
+            const e = logBuffer[i];
+            text += '[' + e.time + '] [' + e.level.toUpperCase() + '] ' + e.args + '\n';
+        }
         const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `st-devtools-${Date.now()}.log`;
+        a.download = 'st-devtools-' + Date.now() + '.log';
         document.body.appendChild(a);
         a.click();
-        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 200);
     }
 
     function copyLogs() {
-        const filtered = logBuffer.filter(e => {
-            if (activeFilter !== 'all' && e.level !== activeFilter) return false;
-            if (searchQuery && !e.args.toLowerCase().includes(searchQuery)) return false;
-            return true;
-        });
-        const text = filtered.map(e => `[${e.time}] [${e.level.toUpperCase()}] ${e.args}`).join('\n');
+        let text = '';
+        let count = 0;
+        for (let i = 0; i < logBuffer.length; i++) {
+            const e = logBuffer[i];
+            if (activeFilter !== 'all' && e.level !== activeFilter) continue;
+            if (searchQuery && e.args.toLowerCase().indexOf(searchQuery) === -1) continue;
+            text += '[' + e.time + '] [' + e.level.toUpperCase() + '] ' + e.args + '\n';
+            count++;
+        }
         navigator.clipboard.writeText(text).then(
-            () => toastr.success(`Скопировано ${filtered.length} записей`),
-            () => toastr.error('Не удалось скопировать')
+            function () { toastr.success('Скопировано ' + count + ' записей'); },
+            function () { toastr.error('Не удалось скопировать'); }
         );
     }
 
     // =========================================================================
-    //  UI — всё в настройках, как у помидора
+    //  UI
     // =========================================================================
     function initUI() {
         const settings = getSettings();
@@ -285,7 +337,7 @@
                     </label>
 
                     <label>лимит записей:</label>
-                    <input id="dt-max-entries" type="number" class="text_pole" value="${settings.max_entries}" min="50" max="5000" step="50" />
+                    <input id="dt-max-entries" type="number" class="text_pole" value="${settings.max_entries}" min="50" max="2000" step="50" />
 
                     <hr style="border-color: rgba(255,255,255,0.08); width:100%; margin:4px 0;" />
 
@@ -349,7 +401,7 @@
             $('#dt-log-list').toggleClass('dt-nowrap', !settings.word_wrap);
         });
         $('#dt-max-entries').on('change', function () {
-            settings.max_entries = Math.max(50, Math.min(5000, parseInt($(this).val(), 10) || 500));
+            settings.max_entries = Math.max(50, Math.min(2000, parseInt($(this).val(), 10) || 200));
             $(this).val(settings.max_entries);
             saveSettings();
         });
@@ -376,14 +428,14 @@
             renderAllEntries();
         });
 
-        // Search
+        // Search (debounced 300ms)
         let searchTimeout;
         $('#dt-search').on('input', function () {
             clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(() => {
-                searchQuery = $(this).val().toLowerCase().trim();
+            searchTimeout = setTimeout(function () {
+                searchQuery = $('#dt-search').val().toLowerCase().trim();
                 renderAllEntries();
-            }, 200);
+            }, 300);
         });
 
         // Actions
@@ -404,10 +456,10 @@
         context.eventSource.on(context.event_types.APP_READY, function () {
             try {
                 initUI();
-                _originals.log('[DevTools] Extension loaded.');
+                _orig.log('[DevTools] Extension loaded.');
             } catch (err) {
-                _originals.error('[DevTools] Init failed:', err);
-                toastr.error(`DevTools: ${err.message}`, 'Ошибка', { timeOut: 8000 });
+                _orig.error('[DevTools] Init failed:', err);
+                toastr.error('DevTools: ' + err.message, 'Ошибка', { timeOut: 8000 });
             }
         });
     });
