@@ -21,6 +21,13 @@
     let searchQuery = '';
     let consoleVisible = false;
 
+    // --- Performance: batch DOM updates ---
+    /** @type {Array<{id: number, level: string, time: string, args: string}>} */
+    let pendingEntries = [];
+    let flushScheduled = false;
+    let errCount = 0;
+    let warnCount = 0;
+
     // Original console references — saved ONCE
     const _originals = {
         log: console.log.bind(console),
@@ -82,9 +89,51 @@
         };
 
         logBuffer.push(entry);
-        while (logBuffer.length > settings.max_entries) logBuffer.shift();
+        if (level === 'error') errCount++;
+        if (level === 'warn') warnCount++;
 
-        if (consoleVisible) appendEntryToDOM(entry);
+        // Trim oldest
+        while (logBuffer.length > settings.max_entries) {
+            const removed = logBuffer.shift();
+            if (removed.level === 'error') errCount--;
+            if (removed.level === 'warn') warnCount--;
+        }
+
+        // Queue for batch DOM update instead of immediate append
+        if (consoleVisible) {
+            pendingEntries.push(entry);
+            scheduleFlush();
+        }
+    }
+
+    function scheduleFlush() {
+        if (flushScheduled) return;
+        flushScheduled = true;
+        requestAnimationFrame(flushPending);
+    }
+
+    function flushPending() {
+        flushScheduled = false;
+        const $list = $('#dt-log-list');
+        if (!$list.length || pendingEntries.length === 0) {
+            pendingEntries = [];
+            return;
+        }
+
+        // Build all HTML at once, append once
+        const htmlParts = [];
+        for (const entry of pendingEntries) {
+            if (activeFilter !== 'all' && entry.level !== activeFilter) continue;
+            if (searchQuery && !entry.args.toLowerCase().includes(searchQuery)) continue;
+            htmlParts.push(buildEntryHtml(entry));
+        }
+        pendingEntries = [];
+
+        if (htmlParts.length > 0) {
+            $list.append(htmlParts.join(''));
+            $list[0].scrollTop = $list[0].scrollHeight;
+        }
+
         updateCounters();
     }
 
@@ -139,15 +188,6 @@
         return `<div class="dt-entry dt-entry-${entry.level}" data-id="${entry.id}">${timeStr}${levelTag}<span class="dt-msg">${escapeHtml(entry.args)}</span></div>`;
     }
 
-    function appendEntryToDOM(entry) {
-        const $list = $('#dt-log-list');
-        if (!$list.length) return;
-        if (activeFilter !== 'all' && entry.level !== activeFilter) return;
-        if (searchQuery && !entry.args.toLowerCase().includes(searchQuery)) return;
-        $list.append(buildEntryHtml(entry));
-        $list.scrollTop($list[0].scrollHeight);
-    }
-
     function renderAllEntries() {
         const $list = $('#dt-log-list');
         if (!$list.length) return;
@@ -157,18 +197,15 @@
             return true;
         });
         $list.html(filtered.map(buildEntryHtml).join(''));
-        $list.scrollTop($list[0].scrollHeight);
+        $list[0].scrollTop = $list[0].scrollHeight;
     }
 
     function updateCounters() {
         const $c = $('#dt-counter');
         if (!$c.length) return;
-        const total = logBuffer.length;
-        const errs = logBuffer.filter(e => e.level === 'error').length;
-        const warns = logBuffer.filter(e => e.level === 'warn').length;
-        let txt = `${total}`;
-        if (errs) txt += ` · <span style="color:#ff6b6b">${errs} err</span>`;
-        if (warns) txt += ` · <span style="color:#ffa726">${warns} warn</span>`;
+        let txt = `${logBuffer.length}`;
+        if (errCount) txt += ` · <span style="color:#ff6b6b">${errCount} err</span>`;
+        if (warnCount) txt += ` · <span style="color:#ffa726">${warnCount} warn</span>`;
         $c.html(txt);
     }
 
@@ -177,7 +214,10 @@
     // =========================================================================
     function clearLogs() {
         logBuffer = [];
+        pendingEntries = [];
         idCounter = 0;
+        errCount = 0;
+        warnCount = 0;
         $('#dt-log-list').empty();
         updateCounters();
     }
