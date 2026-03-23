@@ -2,9 +2,6 @@
 (function () {
     const MODULE_NAME = 'st_devtools';
 
-    // =========================================================================
-    //  CONFIGURATION
-    // =========================================================================
     const DEFAULT_SETTINGS = Object.freeze({
         enabled: true,
         max_entries: 500,
@@ -14,22 +11,17 @@
         capture_info: true,
         capture_debug: false,
         show_timestamps: true,
-        auto_scroll: true,
         word_wrap: true,
-        panel_open: false,
     });
 
-    // =========================================================================
-    //  STATE
-    // =========================================================================
     /** @type {Array<{id: number, level: string, time: string, args: string}>} */
     let logBuffer = [];
     let idCounter = 0;
-    let isPanelVisible = false;
     let activeFilter = 'all';
     let searchQuery = '';
+    let consoleVisible = false;
 
-    // Original console references — saved ONCE, never overwritten
+    // Original console references — saved ONCE
     const _originals = {
         log: console.log.bind(console),
         warn: console.warn.bind(console),
@@ -38,9 +30,6 @@
         debug: console.debug.bind(console),
     };
 
-    // =========================================================================
-    //  HELPERS
-    // =========================================================================
     function getSettings() {
         const ctx = SillyTavern.getContext();
         if (!ctx.extensionSettings) ctx.extensionSettings = {};
@@ -63,7 +52,6 @@
         return `${hh}:${mm}:${ss}.${ms}`;
     }
 
-    /** Turn any value into a readable string */
     function stringify(val) {
         if (val === undefined) return 'undefined';
         if (val === null) return 'null';
@@ -75,7 +63,6 @@
         return String(val);
     }
 
-    /** Escape HTML to prevent XSS in the log viewer */
     function escapeHtml(str) {
         const div = document.createElement('div');
         div.appendChild(document.createTextNode(str));
@@ -83,7 +70,7 @@
     }
 
     // =========================================================================
-    //  CORE: INTERCEPT
+    //  INTERCEPT
     // =========================================================================
     function pushEntry(level, args) {
         const settings = getSettings();
@@ -95,35 +82,20 @@
         };
 
         logBuffer.push(entry);
+        while (logBuffer.length > settings.max_entries) logBuffer.shift();
 
-        // Trim oldest entries when over limit
-        while (logBuffer.length > settings.max_entries) {
-            logBuffer.shift();
-        }
-
-        // Live-update the DOM if panel is visible
-        if (isPanelVisible) {
-            appendEntryToDOM(entry);
-        }
-
-        updateBadge();
+        if (consoleVisible) appendEntryToDOM(entry);
+        updateCounters();
     }
 
     function installHooks() {
         const settings = getSettings();
-
         const wrap = (level, original) => {
             return function (...args) {
-                // Always call the real console method first
                 original(...args);
-                // Then capture
-                const key = `capture_${level}`;
-                if (settings[key]) {
-                    pushEntry(level, args);
-                }
+                if (settings[`capture_${level}`]) pushEntry(level, args);
             };
         };
-
         if (settings.enabled) {
             console.log   = wrap('log',   _originals.log);
             console.warn  = wrap('warn',  _originals.warn);
@@ -141,16 +113,12 @@
         console.debug = _originals.debug;
     }
 
-    // =========================================================================
-    //  GLOBAL ERROR CATCHER (uncaught errors + promise rejections)
-    // =========================================================================
     function installGlobalCatchers() {
         window.addEventListener('error', (ev) => {
             const msg = ev.message || 'Unknown error';
             const src = ev.filename ? `\n    at ${ev.filename}:${ev.lineno}:${ev.colno}` : '';
             pushEntry('error', [`[Uncaught] ${msg}${src}`]);
         });
-
         window.addEventListener('unhandledrejection', (ev) => {
             const reason = ev.reason instanceof Error
                 ? `${ev.reason.message}\n${ev.reason.stack || ''}`
@@ -160,84 +128,48 @@
     }
 
     // =========================================================================
-    //  DOM RENDERING
+    //  DOM
     // =========================================================================
     function buildEntryHtml(entry) {
         const settings = getSettings();
         const timeStr = settings.show_timestamps
-            ? `<span class="dt-time">${entry.time}</span>`
+            ? `<span class="dt-time">${entry.time}</span> `
             : '';
-        const levelBadge = `<span class="dt-level dt-${entry.level}">${entry.level.toUpperCase()}</span>`;
-        const content = `<span class="dt-msg">${escapeHtml(entry.args)}</span>`;
-        return `<div class="dt-entry dt-entry-${entry.level}" data-id="${entry.id}">${timeStr}${levelBadge}${content}</div>`;
+        const levelTag = `<span class="dt-badge dt-badge-${entry.level}">${entry.level.toUpperCase()}</span> `;
+        return `<div class="dt-entry dt-entry-${entry.level}" data-id="${entry.id}">${timeStr}${levelTag}<span class="dt-msg">${escapeHtml(entry.args)}</span></div>`;
     }
 
     function appendEntryToDOM(entry) {
-        const $container = $('#dt-log-list');
-        if (!$container.length) return;
-
-        // Check filters
+        const $list = $('#dt-log-list');
+        if (!$list.length) return;
         if (activeFilter !== 'all' && entry.level !== activeFilter) return;
         if (searchQuery && !entry.args.toLowerCase().includes(searchQuery)) return;
-
-        $container.append(buildEntryHtml(entry));
-
-        if (getSettings().auto_scroll) {
-            const el = $container[0];
-            el.scrollTop = el.scrollHeight;
-        }
+        $list.append(buildEntryHtml(entry));
+        $list.scrollTop($list[0].scrollHeight);
     }
 
     function renderAllEntries() {
-        const $container = $('#dt-log-list');
-        if (!$container.length) return;
-
-        const filtered = logBuffer.filter((e) => {
+        const $list = $('#dt-log-list');
+        if (!$list.length) return;
+        const filtered = logBuffer.filter(e => {
             if (activeFilter !== 'all' && e.level !== activeFilter) return false;
             if (searchQuery && !e.args.toLowerCase().includes(searchQuery)) return false;
             return true;
         });
-
-        $container.html(filtered.map(buildEntryHtml).join(''));
-
-        if (getSettings().auto_scroll) {
-            const el = $container[0];
-            el.scrollTop = el.scrollHeight;
-        }
+        $list.html(filtered.map(buildEntryHtml).join(''));
+        $list.scrollTop($list[0].scrollHeight);
     }
 
-    function updateBadge() {
-        const errCount = logBuffer.filter(e => e.level === 'error').length;
-        const warnCount = logBuffer.filter(e => e.level === 'warn').length;
-        const $badge = $('#dt-fab-badge');
-        if (!$badge.length) return;
-
-        if (errCount > 0) {
-            $badge.text(errCount).css('background', '#e03131').show();
-        } else if (warnCount > 0) {
-            $badge.text(warnCount).css('background', '#e8590c').show();
-        } else {
-            $badge.hide();
-        }
-    }
-
-    // =========================================================================
-    //  PANEL TOGGLE
-    // =========================================================================
-    function showPanel() {
-        isPanelVisible = true;
-        $('#dt-console-panel').addClass('dt-visible');
-        renderAllEntries();
-        updateBadge();
-    }
-
-    function hidePanel() {
-        isPanelVisible = false;
-        $('#dt-console-panel').removeClass('dt-visible');
-    }
-
-    function togglePanel() {
-        isPanelVisible ? hidePanel() : showPanel();
+    function updateCounters() {
+        const $c = $('#dt-counter');
+        if (!$c.length) return;
+        const total = logBuffer.length;
+        const errs = logBuffer.filter(e => e.level === 'error').length;
+        const warns = logBuffer.filter(e => e.level === 'warn').length;
+        let txt = `${total}`;
+        if (errs) txt += ` · <span style="color:#ff6b6b">${errs} err</span>`;
+        if (warns) txt += ` · <span style="color:#ffa726">${warns} warn</span>`;
+        $c.html(txt);
     }
 
     // =========================================================================
@@ -247,7 +179,7 @@
         logBuffer = [];
         idCounter = 0;
         $('#dt-log-list').empty();
-        updateBadge();
+        updateCounters();
     }
 
     function exportLogs() {
@@ -263,7 +195,7 @@
     }
 
     function copyLogs() {
-        const filtered = logBuffer.filter((e) => {
+        const filtered = logBuffer.filter(e => {
             if (activeFilter !== 'all' && e.level !== activeFilter) return false;
             if (searchQuery && !e.args.toLowerCase().includes(searchQuery)) return false;
             return true;
@@ -276,9 +208,9 @@
     }
 
     // =========================================================================
-    //  UI: SETTINGS PANEL (inside Extensions drawer)
+    //  UI — всё в настройках, как у помидора
     // =========================================================================
-    function initSettingsUI() {
+    function initUI() {
         const settings = getSettings();
 
         const html = `
@@ -289,14 +221,13 @@
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content" style="display: flex; flex-direction: column; gap: 8px;">
-                    <span class="dt-hint">Перехватывает console.log / warn / error и показывает прямо в ST.</span>
 
                     <label class="checkbox_label">
                         <input id="dt-enabled" type="checkbox" ${settings.enabled ? 'checked' : ''}>
-                        Перехват включён
+                        перехват включён
                     </label>
 
-                    <div class="dt-settings-row">
+                    <div style="display:flex; flex-wrap:wrap; gap:6px 14px;">
                         <label class="checkbox_label"><input id="dt-cap-log"   type="checkbox" ${settings.capture_log   ? 'checked' : ''}> log</label>
                         <label class="checkbox_label"><input id="dt-cap-warn"  type="checkbox" ${settings.capture_warn  ? 'checked' : ''}> warn</label>
                         <label class="checkbox_label"><input id="dt-cap-error" type="checkbox" ${settings.capture_error ? 'checked' : ''}> error</label>
@@ -304,26 +235,45 @@
                         <label class="checkbox_label"><input id="dt-cap-debug" type="checkbox" ${settings.capture_debug ? 'checked' : ''}> debug</label>
                     </div>
 
-                    <label>Лимит записей:</label>
-                    <input id="dt-max-entries" type="number" class="text_pole" value="${settings.max_entries}" min="50" max="5000" step="50" />
-
                     <label class="checkbox_label">
                         <input id="dt-timestamps" type="checkbox" ${settings.show_timestamps ? 'checked' : ''}>
-                        Показывать время
-                    </label>
-                    <label class="checkbox_label">
-                        <input id="dt-autoscroll" type="checkbox" ${settings.auto_scroll ? 'checked' : ''}>
-                        Автопрокрутка
+                        показывать время
                     </label>
                     <label class="checkbox_label">
                         <input id="dt-wordwrap" type="checkbox" ${settings.word_wrap ? 'checked' : ''}>
-                        Перенос строк
+                        перенос строк
                     </label>
 
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
-                        <div id="dt-btn-open" class="menu_button"><i class="fa-solid fa-terminal"></i> Открыть консоль</div>
-                        <div id="dt-btn-clear-all" class="menu_button"><i class="fa-solid fa-trash"></i> Очистить всё</div>
+                    <label>лимит записей:</label>
+                    <input id="dt-max-entries" type="number" class="text_pole" value="${settings.max_entries}" min="50" max="5000" step="50" />
+
+                    <hr style="border-color: rgba(255,255,255,0.08); width:100%; margin:4px 0;" />
+
+                    <div id="dt-btn-toggle" class="menu_button"><i class="fa-solid fa-terminal"></i> показать консоль</div>
+
+                    <div id="dt-console-block" style="display:none;">
+
+                        <div id="dt-filters" style="display:flex; flex-wrap:wrap; gap:3px; margin-bottom:6px;">
+                            <span class="dt-filter dt-filter-active" data-level="all">All</span>
+                            <span class="dt-filter" data-level="error">Errors</span>
+                            <span class="dt-filter" data-level="warn">Warn</span>
+                            <span class="dt-filter" data-level="log">Log</span>
+                            <span class="dt-filter" data-level="info">Info</span>
+                            <span class="dt-filter" data-level="debug">Debug</span>
+                        </div>
+
+                        <input id="dt-search" type="text" class="text_pole" placeholder="поиск..." style="margin-bottom:6px;" />
+
+                        <div id="dt-log-list" class="${settings.word_wrap ? '' : 'dt-nowrap'}"></div>
+
+                        <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
+                            <span id="dt-counter" style="font-size:0.85em; opacity:0.6;">0</span>
+                            <div class="menu_button" id="dt-btn-copy"><i class="fa-solid fa-copy"></i> копировать</div>
+                            <div class="menu_button" id="dt-btn-export"><i class="fa-solid fa-download"></i> скачать</div>
+                            <div class="menu_button" id="dt-btn-clear"><i class="fa-solid fa-trash-can"></i> очистить</div>
+                        </div>
                     </div>
+
                 </div>
             </div>
         </div>`;
@@ -348,76 +298,40 @@
             $(sel).on('change', function () { settings[key] = $(this).is(':checked'); saveSettings(); });
         }
 
+        $('#dt-timestamps').on('change', function () {
+            settings.show_timestamps = $(this).is(':checked');
+            saveSettings();
+            renderAllEntries();
+        });
+        $('#dt-wordwrap').on('change', function () {
+            settings.word_wrap = $(this).is(':checked');
+            saveSettings();
+            $('#dt-log-list').toggleClass('dt-nowrap', !settings.word_wrap);
+        });
         $('#dt-max-entries').on('change', function () {
             settings.max_entries = Math.max(50, Math.min(5000, parseInt($(this).val(), 10) || 500));
             $(this).val(settings.max_entries);
             saveSettings();
         });
 
-        $('#dt-timestamps').on('change', function () { settings.show_timestamps = $(this).is(':checked'); saveSettings(); renderAllEntries(); });
-        $('#dt-autoscroll').on('change', function () { settings.auto_scroll = $(this).is(':checked'); saveSettings(); });
-        $('#dt-wordwrap').on('change', function () {
-            settings.word_wrap = $(this).is(':checked');
-            saveSettings();
-            $('#dt-log-list').toggleClass('dt-nowrap', !settings.word_wrap);
+        // Console toggle
+        $('#dt-btn-toggle').on('click', function () {
+            consoleVisible = !consoleVisible;
+            if (consoleVisible) {
+                $('#dt-console-block').slideDown(150);
+                $(this).html('<i class="fa-solid fa-terminal"></i> скрыть консоль');
+                renderAllEntries();
+                updateCounters();
+            } else {
+                $('#dt-console-block').slideUp(150);
+                $(this).html('<i class="fa-solid fa-terminal"></i> показать консоль');
+            }
         });
 
-        $('#dt-btn-open').on('click', togglePanel);
-        $('#dt-btn-clear-all').on('click', clearLogs);
-    }
-
-    // =========================================================================
-    //  UI: FLOATING CONSOLE PANEL
-    // =========================================================================
-    function initConsolePanel() {
-        const settings = getSettings();
-
-        const panel = `
-        <div id="dt-console-panel">
-            <div id="dt-panel-header">
-                <div id="dt-panel-title"><i class="fa-solid fa-terminal"></i> DevTools</div>
-                <div id="dt-panel-toolbar">
-                    <div id="dt-filter-bar">
-                        <button class="dt-filter-btn dt-active" data-level="all">All</button>
-                        <button class="dt-filter-btn" data-level="error">Errors</button>
-                        <button class="dt-filter-btn" data-level="warn">Warn</button>
-                        <button class="dt-filter-btn" data-level="log">Log</button>
-                        <button class="dt-filter-btn" data-level="info">Info</button>
-                        <button class="dt-filter-btn" data-level="debug">Debug</button>
-                    </div>
-                    <div id="dt-action-bar">
-                        <input id="dt-search" type="text" placeholder="Фильтр..." />
-                        <button id="dt-btn-copy" class="dt-icon-btn" title="Копировать"><i class="fa-solid fa-copy"></i></button>
-                        <button id="dt-btn-export" class="dt-icon-btn" title="Скачать"><i class="fa-solid fa-download"></i></button>
-                        <button id="dt-btn-clear" class="dt-icon-btn" title="Очистить"><i class="fa-solid fa-trash-can"></i></button>
-                        <button id="dt-btn-close" class="dt-icon-btn" title="Закрыть"><i class="fa-solid fa-xmark"></i></button>
-                    </div>
-                </div>
-            </div>
-            <div id="dt-log-list" class="${settings.word_wrap ? '' : 'dt-nowrap'}"></div>
-            <div id="dt-status-bar">
-                <span id="dt-status-count">0 записей</span>
-            </div>
-        </div>
-
-        <div id="dt-fab" title="DevTools">
-            <i class="fa-solid fa-bug"></i>
-            <span id="dt-fab-badge" style="display:none;">0</span>
-        </div>`;
-
-        $('body').append(panel);
-
-        // --- Panel interactions ---
-        $('#dt-fab').on('click', togglePanel);
-        $('#dt-btn-close').on('click', hidePanel);
-        $('#dt-btn-clear').on('click', clearLogs);
-        $('#dt-btn-export').on('click', exportLogs);
-        $('#dt-btn-copy').on('click', copyLogs);
-
         // Filter tabs
-        $('#dt-filter-bar').on('click', '.dt-filter-btn', function () {
-            $('.dt-filter-btn').removeClass('dt-active');
-            $(this).addClass('dt-active');
+        $('#dt-filters').on('click', '.dt-filter', function () {
+            $('.dt-filter').removeClass('dt-filter-active');
+            $(this).addClass('dt-filter-active');
             activeFilter = $(this).data('level');
             renderAllEntries();
         });
@@ -432,119 +346,11 @@
             }, 200);
         });
 
-        // Draggable header for panel repositioning
-        makeDraggable($('#dt-console-panel')[0], $('#dt-panel-header')[0]);
-
-        // Resize handle
-        makeResizable($('#dt-console-panel')[0]);
+        // Actions
+        $('#dt-btn-copy').on('click', copyLogs);
+        $('#dt-btn-export').on('click', exportLogs);
+        $('#dt-btn-clear').on('click', clearLogs);
     }
-
-    // =========================================================================
-    //  DRAG & RESIZE (touch-friendly)
-    // =========================================================================
-    function makeDraggable(panel, handle) {
-        let startX, startY, startLeft, startTop;
-
-        function onStart(e) {
-            // Don't drag when interacting with buttons/inputs inside the header
-            if ($(e.target).closest('button, input, .dt-filter-btn, .dt-icon-btn').length) return;
-            e.preventDefault();
-
-            const touch = e.touches ? e.touches[0] : e;
-            const rect = panel.getBoundingClientRect();
-            startX = touch.clientX;
-            startY = touch.clientY;
-            startLeft = rect.left;
-            startTop = rect.top;
-
-            panel.classList.add('dt-dragging');
-            document.addEventListener('mousemove', onMove, { passive: false });
-            document.addEventListener('mouseup', onEnd);
-            document.addEventListener('touchmove', onMove, { passive: false });
-            document.addEventListener('touchend', onEnd);
-        }
-
-        function onMove(e) {
-            e.preventDefault();
-            const touch = e.touches ? e.touches[0] : e;
-            const dx = touch.clientX - startX;
-            const dy = touch.clientY - startY;
-            panel.style.left = `${startLeft + dx}px`;
-            panel.style.top = `${startTop + dy}px`;
-            panel.style.right = 'auto';
-            panel.style.bottom = 'auto';
-        }
-
-        function onEnd() {
-            panel.classList.remove('dt-dragging');
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onEnd);
-            document.removeEventListener('touchmove', onMove);
-            document.removeEventListener('touchend', onEnd);
-        }
-
-        handle.addEventListener('mousedown', onStart);
-        handle.addEventListener('touchstart', onStart, { passive: false });
-    }
-
-    function makeResizable(panel) {
-        const resizer = document.createElement('div');
-        resizer.id = 'dt-resize-handle';
-        panel.appendChild(resizer);
-
-        let startX, startY, startW, startH;
-
-        function onStart(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const touch = e.touches ? e.touches[0] : e;
-            startX = touch.clientX;
-            startY = touch.clientY;
-            startW = panel.offsetWidth;
-            startH = panel.offsetHeight;
-
-            document.addEventListener('mousemove', onMove, { passive: false });
-            document.addEventListener('mouseup', onEnd);
-            document.addEventListener('touchmove', onMove, { passive: false });
-            document.addEventListener('touchend', onEnd);
-        }
-
-        function onMove(e) {
-            e.preventDefault();
-            const touch = e.touches ? e.touches[0] : e;
-            const newW = Math.max(280, startW + (touch.clientX - startX));
-            const newH = Math.max(200, startH + (touch.clientY - startY));
-            panel.style.width = `${newW}px`;
-            panel.style.height = `${newH}px`;
-        }
-
-        function onEnd() {
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onEnd);
-            document.removeEventListener('touchmove', onMove);
-            document.removeEventListener('touchend', onEnd);
-        }
-
-        resizer.addEventListener('mousedown', onStart);
-        resizer.addEventListener('touchstart', onStart, { passive: false });
-    }
-
-    // =========================================================================
-    //  STATUS BAR UPDATER
-    // =========================================================================
-    setInterval(() => {
-        const $count = $('#dt-status-count');
-        if (!$count.length) return;
-
-        const total = logBuffer.length;
-        const errors = logBuffer.filter(e => e.level === 'error').length;
-        const warns  = logBuffer.filter(e => e.level === 'warn').length;
-
-        let parts = [`${total} записей`];
-        if (errors > 0) parts.push(`${errors} ошибок`);
-        if (warns > 0) parts.push(`${warns} предупреждений`);
-        $count.text(parts.join(' · '));
-    }, 1000);
 
     // =========================================================================
     //  INIT
@@ -552,18 +358,16 @@
     $(document).ready(function () {
         const context = SillyTavern.getContext();
 
-        // Install hooks ASAP — before APP_READY — to capture early logs
         installHooks();
         installGlobalCatchers();
 
         context.eventSource.on(context.event_types.APP_READY, function () {
             try {
-                initSettingsUI();
-                initConsolePanel();
-                _originals.log('[DevTools] Extension loaded. Capturing console output.');
+                initUI();
+                _originals.log('[DevTools] Extension loaded.');
             } catch (err) {
-                _originals.error('[DevTools] Failed to init UI:', err);
-                toastr.error(`DevTools init error: ${err.message}`, 'DevTools', { timeOut: 8000 });
+                _originals.error('[DevTools] Init failed:', err);
+                toastr.error(`DevTools: ${err.message}`, 'Ошибка', { timeOut: 8000 });
             }
         });
     });
