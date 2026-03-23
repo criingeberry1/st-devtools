@@ -1,0 +1,13 @@
+{
+    "display_name": "DevTools",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "your insomnia & claude code",
+    "version": "1.0.0",
+    "description": "In-app browser console for mobile users. Intercepts all console output and displays it in SillyTavern UI.",
+    "homePage": "",
+    "auto_update": false
+}
