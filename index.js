@@ -385,27 +385,37 @@
         // Echo input to log
         pushEntry('repl', ['> ' + trimmed]);
 
+        const stCtx = SillyTavern.getContext();
+        // @ts-ignore — AsyncFunction constructor trick
+        const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+
         try {
-            const ctx    = SillyTavern.getContext();
-            // @ts-ignore — AsyncFunction constructor trick
-            const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+            let result;
 
-            // Smart execution: first try wrapping in `return(...)` to auto-capture
-            // expression value (mirrors Chrome DevTools behaviour).
-            // Falls back to plain statement mode if that produces a SyntaxError.
-            let fn;
+            // Pass 1 — expression mode.
+            // Wraps code in return() and injects ctx/chat/char/$ as named params.
+            // Works for one-liners: ctx.name, chat.length, 1+2, etc.
             try {
-                fn = new AsyncFn('ctx', 'chat', 'char', '$', 'return (' + trimmed + '\n)');
-            } catch {
-                fn = new AsyncFn('ctx', 'chat', 'char', '$', trimmed);
-            }
+                const fn = new AsyncFn(
+                    'ctx', 'chat', 'char', '$',
+                    'return (\n' + trimmed + '\n)'
+                );
+                result = await fn(
+                    stCtx,
+                    stCtx.chat                              ?? [],
+                    stCtx.characters?.[stCtx.character_id] ?? null,
+                    window.jQuery                           ?? null
+                );
+            } catch (e1) {
+                // Runtime error in expression mode → real error, don't retry.
+                if (!(e1 instanceof SyntaxError)) throw e1;
 
-            const result = await fn(
-                ctx,
-                ctx.chat          ?? [],
-                ctx.characters?.[ctx.character_id] ?? null,
-                window.jQuery     ?? null
-            );
+                // SyntaxError → user wrote statements (const, let, loops, etc).
+                // Pass 2 — statement mode, NO injected params so user's own
+                // variable declarations (const ctx = ...) never conflict.
+                const fn = new AsyncFn(trimmed);
+                result = await fn();
+            }
 
             if (result !== undefined) {
                 pushEntry('repl', ['← ' + stringify(result)]);
@@ -442,6 +452,20 @@
         const recent = entries.slice(-MAX_REPL_OUTPUT_ROWS);
         el.innerHTML = recent.map(e => entryHtml(e, s)).join('');
         el.scrollTop = el.scrollHeight;
+    }
+
+    function copyReplOutput() {
+        const entries = logBuffer.filter(e =>
+            e.level === 'repl' ||
+            (e.level === 'error' && e.args.startsWith('[REPL]'))
+        );
+        const recent = entries.slice(-MAX_REPL_OUTPUT_ROWS);
+        if (recent.length === 0) { toastr.warning('Вывод пуст', 'DevTools'); return; }
+        const text = recent.map(e => e.args).join('\n');
+        navigator.clipboard.writeText(text).then(
+            () => toastr.success('Вывод скопирован', 'DevTools'),
+            () => toastr.error('Не удалось скопировать', 'DevTools')
+        );
     }
 
     // =========================================================================
@@ -753,8 +777,13 @@
           </div>
 
           <!-- REPL output -->
-          <div class="dt-repl-output-label">
-            <i class="fa-solid fa-angles-right"></i> Результат
+          <div class="dt-repl-output-label" style="display:flex;align-items:center;gap:6px;">
+            <span><i class="fa-solid fa-angles-right"></i> Результат</span>
+            <div class="menu_button" id="dt-repl-copy-output"
+                 style="font-size:0.8em;padding:2px 8px;margin-left:auto;"
+                 title="Скопировать вывод">
+              <i class="fa-solid fa-copy"></i> копировать
+            </div>
           </div>
           <div id="dt-repl-output">
             <div class="dt-repl-empty">Результаты появятся здесь</div>
@@ -896,6 +925,7 @@
         $('#dt-repl-save-snippet').on('click', saveCurrentAsSnippet);
         $('#dt-hist-prev').on('click', historyPrev);
         $('#dt-hist-next').on('click', historyNext);
+        $('#dt-repl-copy-output').on('click', copyReplOutput);
 
         // ── Snippets panel (event delegation) ─────────────────────────────
         $('#dt-snippets-list').on('click', '.dt-snippet-load', function () {
