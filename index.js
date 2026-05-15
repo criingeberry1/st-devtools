@@ -43,10 +43,11 @@
 
     // — REPL —
     /** @type {string[]} */
-    let cmdHistory   = [];
-    let historyIndex = -1;   // -1 = not navigating
-    let historyDraft = '';   // editor content saved before navigation
-    let activeTab    = 'log';
+    let cmdHistory        = [];
+    let historyIndex      = -1;   // -1 = not navigating
+    let historyDraft      = '';   // editor content saved before navigation
+    let activeTab         = 'log';
+    let replOutputFromIndex = -1; // logBuffer index where last REPL run started; -1 = never run
 
     // — settings —
     /** @type {typeof DEFAULT_SETTINGS | null} */
@@ -297,10 +298,11 @@
     //  LOG ACTIONS
     // =========================================================================
     function clearLogs() {
-        logBuffer      = [];
-        pendingEntries = [];
-        errCount       = 0;
-        warnCount      = 0;
+        logBuffer         = [];
+        pendingEntries    = [];
+        errCount          = 0;
+        warnCount         = 0;
+        replOutputFromIndex = -1;
         const logEl = document.getElementById('dt-log-list');
         if (logEl) logEl.innerHTML = '';
         updateReplOutput();
@@ -382,8 +384,9 @@
         historyDraft = '';
         updateHistoryPos();
 
-        // Echo input to log
+        // Echo input to log; mark start position for REPL output panel
         pushEntry('repl', ['> ' + trimmed]);
+        replOutputFromIndex = logBuffer.length - 1;
 
         const stCtx = SillyTavern.getContext();
         // @ts-ignore — AsyncFunction constructor trick
@@ -438,30 +441,33 @@
         const el = document.getElementById('dt-repl-output');
         if (!el) return;
 
+        // Nothing executed yet
+        if (replOutputFromIndex === -1) {
+            el.innerHTML = '<div class="dt-repl-empty">Результаты появятся здесь</div>';
+            return;
+        }
+
         const s       = getSettings();
-        const entries = logBuffer.filter(e =>
-            e.level === 'repl' ||
-            (e.level === 'error' && e.args.startsWith('[REPL]'))
-        );
+        // Show every entry produced since this REPL run started:
+        // '> input', console.log/warn/error calls, '← result'
+        const entries = logBuffer.slice(replOutputFromIndex);
 
         if (entries.length === 0) {
             el.innerHTML = '<div class="dt-repl-empty">Результаты появятся здесь</div>';
             return;
         }
 
-        const recent = entries.slice(-MAX_REPL_OUTPUT_ROWS);
-        el.innerHTML = recent.map(e => entryHtml(e, s)).join('');
+        el.innerHTML = entries.map(e => entryHtml(e, s)).join('');
         el.scrollTop = el.scrollHeight;
     }
 
     function copyReplOutput() {
-        const entries = logBuffer.filter(e =>
-            e.level === 'repl' ||
-            (e.level === 'error' && e.args.startsWith('[REPL]'))
-        );
-        const recent = entries.slice(-MAX_REPL_OUTPUT_ROWS);
-        if (recent.length === 0) { toastr.warning('Вывод пуст', 'DevTools'); return; }
-        const text = recent.map(e => e.args).join('\n');
+        if (replOutputFromIndex === -1) { toastr.warning('Вывод пуст', 'DevTools'); return; }
+        const entries = logBuffer.slice(replOutputFromIndex);
+        if (entries.length === 0) { toastr.warning('Вывод пуст', 'DevTools'); return; }
+        const text = entries
+            .map(e => '[' + e.time + '] [' + e.level.toUpperCase() + '] ' + e.args)
+            .join('\n');
         navigator.clipboard.writeText(text).then(
             () => toastr.success('Вывод скопирован', 'DevTools'),
             () => toastr.error('Не удалось скопировать', 'DevTools')
