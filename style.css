@@ -1,18 +1,19 @@
 /* =============================================================
-   DevTools — In-Settings Console
+   DevTools v2.0.0 — In-Settings Console + REPL
    ============================================================= */
 
-/* --- Log container --- */
+/* ── Log container ─────────────────────────────────────────── */
 #dt-log-list {
-    max-height: 350px;
+    max-height: 340px;
     overflow-y: auto;
     overflow-x: hidden;
     background: rgba(0, 0, 0, 0.5);
     padding: 8px;
     font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', 'Consolas', monospace;
     font-size: 0.82em;
-    line-height: 1.4;
-    border-radius: 4px;
+    line-height: 1.45;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 #dt-log-list.dt-nowrap {
@@ -23,85 +24,272 @@
     white-space: nowrap;
 }
 
-/* --- Entries --- */
+/* ── Log entries ───────────────────────────────────────────── */
 .dt-entry {
-    padding: 2px 4px;
+    padding: 3px 4px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     word-break: break-word;
+}
+
+.dt-entry:last-child {
+    border-bottom: none;
 }
 
 .dt-entry:hover {
     background: rgba(255, 255, 255, 0.04);
 }
 
-.dt-entry-error {
-    background: rgba(255, 40, 40, 0.07);
-}
+.dt-entry-error  { background: rgba(255, 40, 40, 0.07); }
+.dt-entry-warn   { background: rgba(255, 180, 0, 0.05); }
+.dt-entry-repl   { background: rgba(100, 200, 130, 0.04); }
 
-.dt-entry-warn {
-    background: rgba(255, 180, 0, 0.05);
-}
-
-/* --- Timestamp --- */
+/* ── Timestamp ─────────────────────────────────────────────── */
 .dt-time {
-    color: rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.28);
     font-size: 0.88em;
-}
-
-/* --- Level badges --- */
-.dt-badge {
-    font-size: 0.78em;
-    font-weight: 700;
-    padding: 0px 4px;
-    border-radius: 3px;
-    letter-spacing: 0.03em;
-}
-
-.dt-badge-log   { background: rgba(255, 255, 255, 0.08); color: #ccc; }
-.dt-badge-info  { background: rgba(80, 180, 255, 0.15);  color: #64b5f6; }
-.dt-badge-warn  { background: rgba(255, 180, 0, 0.18);   color: #ffa726; }
-.dt-badge-error { background: rgba(255, 60, 60, 0.2);    color: #ef5350; }
-.dt-badge-debug { background: rgba(180, 130, 255, 0.15); color: #b388ff; }
-
-/* --- Message text --- */
-.dt-msg {
-    white-space: pre-wrap;
-    color: rgba(255, 255, 255, 0.82);
-}
-
-/* --- Filter tabs --- */
-.dt-filter {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid transparent;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.82em;
-    cursor: pointer;
-    transition: background 0.15s;
     user-select: none;
     -webkit-user-select: none;
 }
 
-.dt-filter:hover {
-    background: rgba(255, 255, 255, 0.1);
+/* ── Level badges ──────────────────────────────────────────── */
+.dt-badge {
+    display: inline-block;
+    font-size: 0.75em;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+    vertical-align: middle;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.dt-badge-log     { background: rgba(255, 255, 255, 0.08); color: #bbb; }
+.dt-badge-info    { background: rgba(80, 180, 255, 0.15);  color: #64b5f6; }
+.dt-badge-warn    { background: rgba(255, 180, 0, 0.18);   color: #ffa726; }
+.dt-badge-error   { background: rgba(255, 60, 60, 0.22);   color: #ef5350; }
+.dt-badge-debug   { background: rgba(180, 130, 255, 0.15); color: #b388ff; }
+.dt-badge-repl-in  { background: rgba(100, 200, 130, 0.14); color: #81c784; }
+.dt-badge-repl-out { background: rgba(180, 140, 255, 0.14); color: #ce93d8; }
+
+/* ── Message text ──────────────────────────────────────────── */
+.dt-msg {
+    white-space: pre-wrap;
+    color: rgba(255, 255, 255, 0.82);
+    vertical-align: middle;
+}
+
+/* ── Filter tabs ───────────────────────────────────────────── */
+.dt-filter {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid transparent;
+    padding: 3px 9px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.dt-filter:active {
+    background: rgba(255, 255, 255, 0.14);
 }
 
 .dt-filter-active {
-    background: rgba(100, 180, 255, 0.15);
-    border-color: rgba(100, 180, 255, 0.4);
+    background: rgba(100, 181, 246, 0.14);
+    border-color: rgba(100, 181, 246, 0.38);
     color: #8ac4ff;
 }
 
-/* --- Scrollbar --- */
-#dt-log-list::-webkit-scrollbar {
-    width: 5px;
+/* ── Console tab bar ───────────────────────────────────────── */
+#dt-console-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 2px;
+    gap: 0;
 }
 
-#dt-log-list::-webkit-scrollbar-track {
+.dt-console-tab {
+    padding: 7px 14px;
+    font-size: 0.84em;
+    cursor: pointer;
+    opacity: 0.55;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+    white-space: nowrap;
+}
+
+.dt-console-tab:active {
+    opacity: 0.9;
+}
+
+.dt-console-tab.dt-tab-active {
+    opacity: 1;
+    border-bottom-color: #64b5f6;
+    color: #8ac4ff;
+}
+
+/* ── REPL textarea ─────────────────────────────────────────── */
+.dt-repl-textarea {
+    font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', 'Consolas', monospace !important;
+    font-size: 0.85em !important;
+    line-height: 1.55 !important;
+    resize: vertical;
+    min-height: 96px;
+    background: rgba(0, 0, 0, 0.45) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 6px !important;
+    tab-size: 2;
+    caret-color: #81c784;
+    transition: border-color 0.15s;
+}
+
+.dt-repl-textarea:focus {
+    border-color: rgba(100, 181, 246, 0.4) !important;
+    outline: none;
+}
+
+/* ── REPL run button ───────────────────────────────────────── */
+.dt-run-btn {
+    background: rgba(100, 200, 130, 0.14) !important;
+    border-color: rgba(100, 200, 130, 0.3) !important;
+    color: #81c784 !important;
+}
+
+.dt-run-btn:hover,
+.dt-run-btn:active {
+    background: rgba(100, 200, 130, 0.24) !important;
+}
+
+.dt-shortcut-hint {
+    font-size: 0.78em;
+    opacity: 0.45;
+    margin-left: 4px;
+}
+
+/* ── History navigation ────────────────────────────────────── */
+.dt-hist-btn {
+    font-size: 0.82em !important;
+    padding: 4px 10px !important;
+}
+
+.dt-hist-pos-label {
+    font-size: 0.78em;
+    opacity: 0.4;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    padding-left: 4px;
+}
+
+/* ── REPL output area ──────────────────────────────────────── */
+.dt-repl-output-label {
+    font-size: 0.78em;
+    opacity: 0.4;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 2px 0;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+#dt-repl-output {
+    max-height: 220px;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+    font-size: 0.82em;
+    line-height: 1.45;
+}
+
+/* ── Empty state placeholder ───────────────────────────────── */
+.dt-repl-empty {
+    text-align: center;
+    opacity: 0.35;
+    font-size: 0.88em;
+    padding: 14px 8px;
+    line-height: 1.6;
+}
+
+/* ── Snippet items ─────────────────────────────────────────── */
+.dt-snippet-item {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 7px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    transition: border-color 0.15s;
+}
+
+.dt-snippet-item:last-child {
+    margin-bottom: 0;
+}
+
+.dt-snippet-item:hover {
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.dt-snippet-name {
+    font-weight: 600;
+    font-size: 0.92em;
+    margin-bottom: 5px;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.dt-snippet-code {
+    font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+    font-size: 0.78em;
+    color: rgba(255, 255, 255, 0.38);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 8px;
+    padding: 4px 6px;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+}
+
+.dt-snippet-actions {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.dt-snippet-del {
+    margin-left: auto !important;
+    background: rgba(255, 60, 60, 0.1) !important;
+    color: #ef5350 !important;
+}
+
+.dt-snippet-del:hover,
+.dt-snippet-del:active {
+    background: rgba(255, 60, 60, 0.22) !important;
+}
+
+/* ── Scrollbars (WebKit) ───────────────────────────────────── */
+#dt-log-list::-webkit-scrollbar,
+#dt-repl-output::-webkit-scrollbar {
+    width: 4px;
+}
+
+#dt-log-list::-webkit-scrollbar-track,
+#dt-repl-output::-webkit-scrollbar-track {
     background: transparent;
 }
 
-#dt-log-list::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 3px;
+#dt-log-list::-webkit-scrollbar-thumb,
+#dt-repl-output::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 2px;
+}
+
+#dt-log-list::-webkit-scrollbar-thumb:hover,
+#dt-repl-output::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.24);
 }
